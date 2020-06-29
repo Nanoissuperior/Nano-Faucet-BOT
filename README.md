@@ -1,1 +1,1 @@
-##Nano Faucet Discord Bot
+#Nano Faucet Discord Bot
