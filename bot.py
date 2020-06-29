@@ -31,6 +31,9 @@ discordrole = "SET ROLE ALLOWED TO USE FAUCET"
 #bottoken
 TOKEN = 'YOUR TOKEN WILL GO HERE'
 
+#discordID for support (Should be set to YOUR discord ID)
+discordID = 0000000000000
+
 #Discord Status
 status = discord.Game("Nano Network")
 
@@ -103,7 +106,7 @@ async def faucet(ctx, nano_address):
             amountofclaims = db.search(Query().user == user)[0].get("Claims")
             db.update({'Claims': amountofclaims+1 }, Query().user == user)
     else:
-        await ctx.send("Something has gone wrong while sending you Nano, let me get some help. <@494491139085172736>") 
+        await ctx.send("Something has gone wrong while sending you Nano, let me get some help. <@"+discordID+">") 
 
 @faucet.error
 async def missing_arg_error(ctx, error):
