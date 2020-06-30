@@ -1,122 +1,122 @@
+from config import *
 
-import discord
-from discord.ext import commands
-import requests
-from requests import Request, Session
-from requests.exceptions import ConnectionError, Timeout, TooManyRedirects
 import json
 import random
 import math
 import re
+
+import discord
+from discord.ext import commands
+
 import asyncio
+import aiohttp
 import aioredis
-from tinydb import TinyDB, Query
-db = TinyDB('users.json')
-
-#NodeURL (Currently using pippin must be changed to what you want)
-nodeurl = "http://127.0.0.1:11338"
-
-#Wallet Created on node.
-nodewallet = "WALLET HERE"
-
-#Address created from wallet.
-nodeaccount = "ADDRESS HERE"
-
-#Amount faucet should pay out in raw
-faucetamount= 100000000000000000000000000
-
-#Set discord role allowed to use
-discordrole = "SET ROLE ALLOWED TO USE FAUCET"
-
-#bottoken
-TOKEN = 'YOUR TOKEN WILL GO HERE'
-
-#discordID for support (Should be set to YOUR discord ID)
-discordID = 0000000000000
-
-#Discord Status
-status = discord.Game("Nano Network")
+from tinydb import where
+from aiotinydb import AIOTinyDB
 
 loop = asyncio.get_event_loop()
 
 pool = aioredis.create_pool(
         'redis://localhost',
-        minsize=5, maxsize=10,
+        minsize=1, maxsize=2,
         loop = loop
 )
 
+db = AIOTinyDB(DB_NAME)
 
-
-
+activity = discord.Activity(type=discord.ActivityType.watching, name=ACTIVITY_NAME)
 bot = commands.Bot(command_prefix='*')
 bot.remove_command("help")
 
+# Wrapper for aiohttp POST
+async def post(js_data):
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(NODE_RPC_URL, json=js_data) as response:
+                return await response.json()
+        except Exception as e:
+            print(f"Error trying to POST {js_data}: {e}")
+            return None
+
 @bot.event
 async def on_ready():
-    print('I am online!')
-    await bot.change_presence(status=discord.Status.online,activity=status)
+    await bot.change_presence(status=discord.Status.online, activity=activity)
     global pool
-    pool = await pool 
+    pool = await pool
+    print('I am online!')
 
 @bot.command()
 async def help(ctx):
-    await ctx.send("*blocks - Shows current block count. \n*faucet ``nano_address``  - will send some Nano to the address you specify.")
-
+    await ctx.send("""Available commands:
+        *blocks - shows current block count.
+        *faucet ``nano_address``  - will send some Nano to the address you specify.
+        """
+    )
 
 @bot.command()
 async def blocks(ctx):
-    """Gives blocks"""
-    count = requests.post(nodeurl, json = {"action" : "block_count"})
-    count=count.json()["count"]
-    await ctx.send("```Current Blocks: "+count+"```")
+    """Print the block count from the node"""
+    result = await post({"action" : "block_count"})
+    if result and "count" in result:
+        await ctx.send(f"""```
+        Blocks: {result['count']}
+        Uncemented: {int(result['count']) - int(result['cemented'])}```""")
 
-#FAUCET
-#24 Hours seconds
-CLAIM_PERIOD = 86400
+def can_use_faucet(ctx):
+    if ALLOWED_ROLE:
+        return ALLOWED_ROLE in [role.name for role in ctx.message.author.roles]
+    else:
+        return str(ctx.message.channel) == ALLOWED_CHANNEL
 
-
-@bot.command()
-@commands.has_role(discordrole)
+@bot.command(pass_context=True)
+@commands.check(can_use_faucet)
 async def faucet(ctx, nano_address):
     user = str(ctx.message.author.id)
-    global pool
 
-    ttl = int(await pool.execute('ttl', ctx.message.author.id))
+    ttl = int(await pool.execute('ttl', f"faucet:{user}"))
     if ttl != -2: #special return code for key does not exist or expired
-        await ctx.send('You must wait {} hours before you can claim again'.format(math.ceil(ttl/(3600))))
+        await ctx.send(f"You must wait {math.ceil(ttl/(3600))} hours before you can claim again")
         return
 
-    p = re.compile('^(nano|xrb)_[13]{1}[13456789abcdefghijkmnopqrstuwxyz]{59}$')
+    p = re.compile('nano_[13]{1}[13456789abcdefghijkmnopqrstuwxyz]{59}$')
     if not p.match(nano_address):
-        await ctx.send('Not a valid nano address')
+        await ctx.send(f"Not a valid nano address, must start with nano_")
         return
 
-    sendnano = requests.post(nodeurl, json = {"action":"send","wallet":nodewallet,"source": nodeaccount,"destination":nano_address,"amount":faucetamount})
-    block=sendnano.json()["block"]
-    if "block" in sendnano.json():
-        await ctx.send("```Transaction Complete\nblock: " +block+"```")
+    result = await post({"action":"send","wallet":NODE_WALLET_ID,"source": NODE_ACCOUNT,"destination":nano_address,"amount":FAUCET_AMOUNT})
+    if result and "block" in result:
+        block=result["block"]
+        await ctx.send(f"```Transaction Complete\nblock: {block}```")
         # set in DB with an expiry so that they can't claim again for a while
-        await pool.execute('setex',ctx.message.author.id, CLAIM_PERIOD, nano_address)
-        print(user + " Just claimed some Nano.")
-        if len(db.search(Query().user == user))==0:
-            print(user + " Has not claimed from the faucet before, adding to user db")
-            db.insert({'user': user, 'nano_address': nano_address,'Claims': 1})
-    
-        else:
-            amountofclaims = db.search(Query().user == user)[0].get("Claims")
-            db.update({'Claims': amountofclaims+1 }, Query().user == user)
+        await pool.execute('setex',f"faucet:{user}", CLAIM_PERIOD, nano_address)
+        print(f"{user} just claimed some Nano")
+        async with db:
+            search = db.search(where('user') == user)
+            if not search:
+                print(f"{user} has not claimed from the faucet before, adding to user db")
+                db.insert({'user': user, 'nano_address': nano_address,'claims': 1})
+            else:
+                db.update({'claims': search[0].get("claims")+1, 'nano_address': nano_address}, where('user') == user)
+    elif SUPPORT_ID:
+        await ctx.send(f"Something has gone wrong while sending you Nano, let me get some help. <@{SUPPORT_ID}>")
     else:
-        await ctx.send("Something has gone wrong while sending you Nano, let me get some help. <@"+discordID+">") 
+        print(f"Error requesting a send: {result}")
 
 @faucet.error
 async def missing_arg_error(ctx, error):
     user = str(ctx.message.author.id)
     if isinstance(error, commands.errors.MissingRequiredArgument):
-        await ctx.send("looks like you didnt give me a nano address, try sending again using the following format ``*faucet nano_1superior*****``")
-
-bot.run(TOKEN)
+        await ctx.send("Usage: ``*faucet nano_1youraccount*****``")
 
 async def shutdown():
+    global pool
     pool.close()
     await pool.wait_closed()
-loop.run_until_complete(shutdown())
+
+try:
+    loop.run_until_complete(bot.start(TOKEN))
+except KeyboardInterrupt:
+    loop.run_until_complete(bot.logout())
+    loop.run_until_complete(shutdown())
+finally:
+    loop.close()
