@@ -1,0 +1,4 @@
+python-dotenv
+discord
+aioredis
+aiotinydb
